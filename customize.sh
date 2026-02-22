@@ -1,6 +1,7 @@
+#!/system/bin/sh
 # 🧊 FROSTY - GMS Freezer / Battery Saver
 # Author: Drsexo (GitHub)
-
+# Optimized & Secured byKevyn
 
 TIMEOUT=30
 
@@ -20,6 +21,50 @@ BOX_TOP="  ┌${LINE}┐"
 BOX_BOT="  └${LINE}┘"
 unset _i _iw
 
+# --- Funciones de Seguridad y Notificación ---
+show_error_notification() {
+  local title="$1"
+  local message="$2"
+  su -c "cmd notification post -S bigtext -t '$title' 'Frosty Module' '$message'" 2>/dev/null
+  ui_print "  ❌ ERROR: $message"
+  ui_print "  🔔 Notificación enviada al usuario."
+}
+
+disable_module_safely() {
+  local reason="$1"
+  show_error_notification "Frosty Module Desactivado" "$reason"
+  echo "stock" > "$MODPATH/config/state"
+  if [ -f "$MODPATH/deep_doze.sh" ]; then
+    sh "$MODPATH/deep_doze.sh" stock >> "$MODPATH/logs/emergency_revert.log" 2>&1
+  fi
+  ui_print "  ⚠️  Módulo desactivado por seguridad: $reason"
+  ui_print "  📄 Revisa los logs en $MODPATH/logs/"
+  exit 1
+}
+
+check_root() {
+  if ! su -c "echo 'root check'" >/dev/null 2>&1; then
+    disable_module_safely "No se tienen permisos de root."
+  fi
+}
+
+command_exists() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+check_critical_environment() {
+  if ! command_exists "su"; then
+    disable_module_safely "Comando 'su' no disponible."
+  fi
+  if ! command_exists "getevent"; then
+    disable_module_safely "Comando 'getevent' no disponible."
+  fi
+  if ! command_exists "settings"; then
+    disable_module_safely "Comando 'settings' no disponible."
+  fi
+}
+
+# --- Funciones de UI ---
 print_banner() {
   ui_print ""
   ui_print "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣤⡀⠀⣠⡆⠀⠀⠀⠀⠀⠀⠀⠀⣤⠀⠀⠀⠀⠀⠀"
@@ -160,7 +205,7 @@ choose_gms() {
   done
 }
 
-# Permissions
+# --- Permisos ---
 set_perm_recursive "$MODPATH" 0 0 0755 0644
 set_perm "$MODPATH/service.sh" 0 0 0755
 set_perm "$MODPATH/post-fs-data.sh" 0 0 0755
@@ -175,9 +220,24 @@ fi
 mkdir -p "$MODPATH/config"
 mkdir -p "$MODPATH/logs"
 
-print_banner
+# --- Crear doze_whitelist.txt ---
+cat > "$MODPATH/config/doze_whitelist.txt" << EOF
+# Lista blanca de aplicaciones y servicios que no deben ser optimizados
+com.bancomer.mbanking
+com.google.android.gms.location.fused.FusedLocationService
+com.google.android.gms.location.internal.server.GoogleLocationService
+com.google.android.gms.location.reporting.service.ReportingAndroidService
+EOF
+chmod 644 "$MODPATH/config/doze_whitelist.txt"
+ui_print "  ✓ doze_whitelist.txt creado"
 
-# System Tweaks
+
+# --- Inicio del Script ---
+print_banner
+check_root
+check_critical_environment
+
+# --- System Tweaks ---
 print_section "⚙️  System Tweaks"
 ui_print ""
 ui_print "  ⬆️ Vol UP = YES  |  ⬇️ Vol DOWN = NO"
@@ -190,7 +250,7 @@ ENABLE_BLUR_DISABLE=$?
 choose_tweak "📝 Kill Log Processes? (logcat, logd, traced, etc.)" "YES"
 ENABLE_LOG_KILLING=$?
 
-# GMS Doze
+# --- GMS Doze ---
 print_section "💤  GMS Doze"
 ui_print ""
 ui_print "  Patches system XMLs to allow GMS battery optimization"
@@ -219,7 +279,6 @@ if [ "$ENABLE_GMS_DOZE" -eq 1 ]; then
   TMPFILE="$MODPATH/found_xmls.tmp"
   : > "$TMPFILE"
 
-  # Search system XMLs for power-save whitelist entries only
   for DIR in /system /vendor /system_ext /product /odm; do
     [ ! -d "$DIR" ] && continue
     find "$DIR" -type f -iname "*.xml" 2>/dev/null | while read -r FILE; do
@@ -236,10 +295,11 @@ if [ "$ENABLE_GMS_DOZE" -eq 1 ]; then
 
       OVERLAY="$MODPATH$XMLFILE"
       mkdir -p "$(dirname "$OVERLAY")"
-      cp -af "$XMLFILE" "$OVERLAY"
-
-      # Only remove power-save entries, NOT location entries
-      sed -i "/$SYS_STR1/d;/$SYS_STR2/d" "$OVERLAY"
+      if ! cp -af "$XMLFILE" "$OVERLAY"; then
+        show_error_notification "Frosty Error" "Failed to copy $XMLFILE"
+        continue
+      fi
+      sed -i "/$SYS_STR1/d;/$SYS_STR2/d" "$OVERLAY" || show_error_notification "Frosty Error" "Failed to patch $XMLFILE"
 
       ui_print "    ✓ Patched: $XMLFILE"
       PATCHED_COUNT=$((PATCHED_COUNT + 1))
@@ -248,7 +308,6 @@ if [ "$ENABLE_GMS_DOZE" -eq 1 ]; then
 
   rm -f "$TMPFILE"
 
-  # Merge non-system dirs into system/ for Magisk overlay
   for SUBDIR in product vendor system_ext odm; do
     if [ -d "$MODPATH/$SUBDIR" ]; then
       mkdir -p "$MODPATH/system/$SUBDIR"
@@ -260,34 +319,31 @@ if [ "$ENABLE_GMS_DOZE" -eq 1 ]; then
   if [ "$PATCHED_COUNT" -eq 0 ]; then
     ui_print ""
     ui_print "  ℹ️ No XML files needed patching"
-    ui_print "  (GMS may already be optimizable on this ROM)"
   else
     ui_print ""
     ui_print "  ✓ Patched $PATCHED_COUNT XML file(s)"
   fi
 
-  # Patch conflicting module XMLs
   ui_print ""
   ui_print "  Checking for conflicting modules..."
   MOD_PATCHED=0
   for xml in $(find /data/adb/modules -type f -name "*.xml" 2>/dev/null); do
     case "$xml" in "$MODPATH"*) continue ;; esac
     if grep -qE "$MOD_STR1|$MOD_STR2|$MOD_STR3|$MOD_STR4" "$xml" 2>/dev/null; then
-      sed -i "/$MOD_STR1/d;/$MOD_STR2/d;/$MOD_STR3/d;/$MOD_STR4/d" "$xml"
+      sed -i "/$MOD_STR1/d;/$MOD_STR2/d;/$MOD_STR3/d;/$MOD_STR4/d" "$xml" || show_error_notification "Frosty Error" "Failed to patch conflicting module XML"
       MOD_PATCHED=$((MOD_PATCHED + 1))
     fi
   done
   [ "$MOD_PATCHED" -gt 0 ] && ui_print "  ✓ Patched $MOD_PATCHED conflicting module XML(s)"
 
-  # Clear old GMS data (fixes delayed notifications after first install)
   ui_print ""
   ui_print "  Clearing GMS cache..."
   cd /data/data
-  find . -type f -name '*gms*' -delete 2>/dev/null
+  find . -type f -name '*gms*' -delete 2>/dev/null || show_error_notification "Frosty Error" "Failed to clear GMS cache"
   ui_print "  ✓ GMS cache cleared"
 fi
 
-# Deep Doze
+# --- Deep Doze ---
 print_section "🔋  Deep Doze"
 ui_print ""
 ui_print "  Aggressive battery optimization for ALL apps"
@@ -321,7 +377,7 @@ if [ "$ENABLE_DEEP_DOZE" -eq 1 ]; then
   unset CHOSEN_LEVEL
 fi
 
-# GMS Categories
+# --- GMS Categories ---
 ui_print ""
 print_section "🧊  GMS Service Categories"
 ui_print ""
@@ -344,7 +400,7 @@ DISABLE_WEARABLES=$?
 choose_gms "🎮 GAMES" "Play Games, Achievements, Cloud Saves" "BREAKS: Play Games achievements, leaderboards!" "FREEZE"
 DISABLE_GAMES=$?
 
-# Save Configuration
+# --- Save Configuration ---
 print_section "💾  Saving Configuration"
 cat > "$MODPATH/config/user_prefs" << EOF
 ENABLE_KERNEL_TWEAKS=$ENABLE_KERNEL_TWEAKS
@@ -367,12 +423,11 @@ echo "frozen" > "$MODPATH/config/state"
 ui_print ""
 ui_print "  ✓ Configuration saved"
 
-# Only keep empty RC overlays if log killing is enabled
 if [ "$ENABLE_LOG_KILLING" -ne 1 ]; then
   rm -rf "$MODPATH/system/etc/init"
 fi
 
-# Summary
+# --- Summary ---
 print_section "📋  Summary"
 ui_print ""
 ui_print "  System Tweaks:"
@@ -417,12 +472,12 @@ ui_print ""
 ui_print "  💡 Use ACTION BUTTON in root manager to toggle"
 ui_print "     between 🧊 Frozen and 🔥 Stock modes"
 ui_print ""
-ui_print "  📝 Edit whitelist: /data/adb/modules/Frosty/config/"
+ui_print "  📝 Edit whitelist: /data/adb/modules/FrostyEnhanced/config/"
 ui_print "     doze_whitelist.txt"
 ui_print ""
 ui_print "  ⚠️  If issues occur → Action Button → Stock"
 ui_print ""
-ui_print "  📄 Logs: /data/adb/modules/Frosty/logs/"
+ui_print "  📄 Logs: /data/adb/modules/FrostyEnhanced/logs/"
 ui_print ""
 print_section "❆  Stay Frosty!  ❆"
 ui_print ""
